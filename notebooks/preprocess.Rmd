@@ -1,0 +1,90 @@
+---
+title: "Language Variety: Preprocessing"
+author: "Brendan Kennedy"
+date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+output: html_document
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, 
+                    encoding = encoding, 
+                    output_file=file.path("output", "markdown", "preprocess.html"))})
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set-up libraries, paths, scripts
+
+```{r init, echo=FALSE, message=FALSE, warning=FALSE}
+library(here)
+library(reticulate)
+library(tidyverse)
+
+DATA_ROUND <- "round1"  # either round1 or round2
+output_dir_data <- here("output", "data", DATA_ROUND)
+
+virtualenv_path <- Sys.getenv("VENV_PATH")
+Sys.setenv("RETICULATE_PYTHON" = "~/.virtualenvs/py-lv/bin/python3")
+
+LV_ROOT <- Sys.getenv("LV_ROOT")
+use_virtualenv(virtualenv_path, required = TRUE)
+use_python(file.path(virtualenv_path, "bin", "python3"), required = TRUE)
+use_python("/Users/brendan/.virtualenvs/py-lv/bin/python3", required = TRUE)
+reticulate::py_discover_config()
+source_python(file=here("src", "python", "data.py"))
+ds <- Dataset(LV_ROOT, DATA_ROUND)
+```
+
+## Data Loading, Cleaning, and Merging
+
+Using the back-end python scripts for loading data from excel/csv/json files, all SPiN, SPAN, and media diet data are taken in and merged together.
+
+```{r study1_preprocess, message=FALSE, warning=FALSE}
+
+qualtrics <- ds$get_qualtrics()
+
+demo_joined_with_behavioral <- ds$get_demographics(qualtrics) %>%
+  #distinct(participant_id, .keep_all=TRUE) %>%
+  left_join(
+    read_csv(file.path(LV_ROOT,  
+                       "CodedDemographics",  
+                       paste0(DATA_ROUND, "_clean_all.csv"))) %>% 
+      select(qualtrics_id, sex_or, language.clean, 
+             gender.clean, race.nih, ethnicity.nih),
+    by='qualtrics_id') 
+write_tsv(demo_joined_with_behavioral, 
+          file.path(output_dir_data, "demographics_and_behavioral.tsv"))
+
+ds$get_media_diet(qualtrics) %>%
+  as_tibble() %>%
+  replace_na(list(author=c(""))) %>%
+  unnest(author) %>%
+  naniar::replace_with_na(list(author="")) %>%
+  write_tsv(file.path(output_dir_data, "media_diet.tsv"))
+```
+
+## Study 1 Preprocessing: Participant-level features and clustering
+
+### Clustering
+
+Clusters are generated from the three feature sets produced above (items, types, lda). For items features, a spectral clustering approach was used, which more effectively computes participant-participant similarity based on the intersection of their media items. For types (normalized counts of media type frequency) and LDA (per participant, aggregate probability of using a given topic), $k$-means clustering was used. 
+
+In both cases, an automated heuristic was used to select the optimal number of clusters. For $k$-means, the elbow heuristic was used, automated by considering the within-cluster sum of squares (`wcss`) across possible values of $k$ (range(2, 20)), and taking the $k$ for which the distance between $wcss_k$ and the line between $wcss_2$ and $wcss_{20}$ was maximized. For spectral clustering, which first computes a similarity matrix among participants $S_{N x N}$, the eigen-gap heuristic was used. This computes the first $K$ eigen-values of the normalized graph Laplacian (used in spectral embedding), and looks for two consecutive eigen-values which are maximally distant. The lower of these two values is selected as $k$, and clustering is recomputed with only $k$ components. 
+
+```{r clustering, eval=FALSE}
+
+source_python(here("src", "python", "clustering.py"))
+source_python(here("src", "python", "features.py"))
+
+#items_features <- read_csv(file.path(output_dir_data, "features", "items.csv"))
+fs <- Features()
+media_diet <- read_tsv(file.path(output_dir_data, "media_diet.tsv"))
+items_features <- fs$get_items_features(media_diet, min_num=2) # play with min_num?
+sim_matrix <- get_sim_matrix(items_features, dist_metric='jaccard')
+items_clusters <- get_spectral_clusters(sim_matrix, "items")
+
+items_clusters %>%
+  write_csv(file.path(output_dir_data, "items_clusters.csv"))
+```

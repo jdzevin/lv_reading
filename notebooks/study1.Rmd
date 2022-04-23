@@ -1,0 +1,163 @@
+---
+title: "Study 1"
+author: "Brendan Kennedy"
+date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+output: html_document
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, 
+                    encoding = encoding, 
+                    output_file=file.path("output", "markdown", "study1.html"))})
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r init, echo=FALSE, message=FALSE, warning=FALSE}
+
+library(here)
+library(tidyverse)
+library(reticulate)
+library(lme4)
+library(lmerTest)
+
+LV_ROOT <- Sys.getenv("LV_ROOT")
+VENV_PATH <- Sys.getenv("VENV_PATH")
+ROUND <- "round1"
+
+options(qwraps2_markup = "markdown")
+
+use_virtualenv(VENV_PATH, required = TRUE)
+use_python(file.path(VENV_PATH, "bin", "python3"), required = TRUE)
+
+source(here("src", "R", "study1.R"))
+source(here("src", "R", "plotting.R"))
+
+```
+
+```{r data_loading, echo=FALSE, message=FALSE}
+
+data_list <- load_data(data_round = ROUND)
+head(data_list$participants, n=5)
+
+```
+
+The following table displays aggregate demographic statistics for the sample ($N$ = 208) following the exclusion of participants ($n$=10) falling in small clusters (those containing less than 5 participants).
+
+
+```{r summarize, echo=FALSE, results="asis"}
+summarize_demographics(data_list$participants)
+
+```
+
+The same statistics on the 10 participants that were dropped:
+
+```{r summarize_dropped, echo=FALSE, results="asis"}
+
+summarize_demographics(data_list$dropped.participants)
+
+```
+
+Summary statistics for our dependent variables, grouped by subject pools (USC and Community):
+
+```{r dv_summary, echo=FALSE, results="asis"}
+summarize_spin_and_span(data_list$participants)
+```
+
+## Vizualize Cluster Demographics
+
+```{r cluster_demo_viz, echo=F, warning=F, message=F}
+
+plt_df <- preprocess_participants_for_plotting(data_list$participants)
+bar_plots <- plot_demo_as_bar_charts(plt_df, output_dir=here("output", "figures", ROUND, "clusters"))
+
+```
+
+## Inter-cluster Similarities (ARI)
+
+How similar are cluster method outputs to each other? If we treat a categorical demographic variable as a ground truth cluster, what are the observed similarities? We answer these questions using the adjusted Rand Index, which approximates the probability of a pair of observations within the first clustering also co-occurring in the second.
+
+```{r cluster_similarity, echo=F}
+
+source_python(here("src", "python", "clustering.py"))
+
+ari_mat <- compute_ari_stats(participant_df = data_list$participants, eval_type = 'num1')  # one sided ARI
+ari_plot <- plot_ari(ari_mat)
+ggsave(here("output", "figures", ROUND, "ari_barchart.png"), width=4, height=2, units='in')
+ari_plot
+
+```
+
+## Are Clusters Predictive of Performance? 
+
+```{r cluster_predictiveness, echo=F, results='asis', warning=F, message=F}
+
+cluster_performance_results <- run_spin_models(data_list$participants)
+
+knitr::kable(cluster_performance_results$spin_high_table)
+#print(xtable::xtable(cluster_performance_results$spin_high_table, type='latex'), 
+      #sanitize.text.function = function(x) {x},
+      #include.rownames=F)
+#print(xtable::xtable(cluster_performance_results$spin_low_table, type='html'), 
+      #sanitize.text.function = function(x) {x},
+      #include.rownames=F)
+#print(xtable::xtable(cluster_performance_results$span_table, type='html'), 
+      #sanitize.text.function = function(x) {x},
+      #include.rownames=F)
+
+res <- cluster_performance_results
+  emm.spin.h <- emmeans::emmeans(res$spin.h.cluster, "cluster", type='response') %>%
+    as.data.frame() %>%
+    rename(response=rate) %>%
+    add_column(task="SPiN-High")
+  emm.spin.l <- emmeans::emmeans(res$spin.l.cluster, "cluster", type='response') %>%
+    as.data.frame() %>%
+    rename(response=rate) %>%
+    add_column(task="SPiN-Low")
+  emm.span <- emmeans::emmeans(res$span.cluster, "cluster", type='response') %>%
+    as.data.frame() %>%
+    add_column(task="SPAN")
+  
+spin_lims <- c(min(min(emm.spin.h$asymp.LCL), min(emm.spin.l$asymp.LCL)),
+               max(max(emm.spin.h$asymp.UCL), max(emm.spin.l$asymp.UCL)))
+
+p_1 <- ggplot(emm.spin.h, aes(x=reorder(cluster, response), y=response)) + 
+    geom_point(shape=7) +
+    geom_errorbar(aes(ymin=asymp.LCL,
+                      ymax=asymp.UCL),
+                  width=.4) +
+    jtools::theme_apa(remove.y.gridlines = F, remove.x.gridlines = F) +
+    xlab("Cluster") + ylab("SPiN-High EMM") +
+    ylim(spin_lims)
+p_2 <- ggplot(emm.spin.l, aes(x=reorder(cluster, response), y=response)) + 
+    geom_point(shape=7) +
+    geom_errorbar(aes(ymin=asymp.LCL,
+                      ymax=asymp.UCL),
+                  width=.4) +
+    jtools::theme_apa(remove.y.gridlines = F, remove.x.gridlines = F) +
+    xlab("Cluster") + ylab("SPiN-Low EMM") + 
+    ylim(spin_lims)
+p_3 <- ggplot(emm.span, aes(x=reorder(cluster, response), y=response)) + 
+    geom_point(shape=7) +
+    geom_errorbar(aes(ymin=asymp.LCL,
+                      ymax=asymp.UCL),
+                  width=.4) +
+    jtools::theme_apa(remove.y.gridlines = F, remove.x.gridlines = F) +
+    xlab("Cluster") + ylab("Span EMM")
+
+#ggsave(here("output", "figures", ROUND, "emm_clusters.png"), dpi = 300,
+            #units='in', width = 6, height = 2.5)
+ggsave(here("output", "figures", ROUND, "emm_clusters_spinh.png"), plot=p_1, dpi = 300,
+            units='in', width = 2, height = 2.5)
+ggsave(here("output", "figures", ROUND, "emm_clusters_spinl.png"), plot=p_2, dpi = 300,
+            units='in', width = 2, height = 2.5)
+ggsave(here("output", "figures", ROUND, "emm_clusters_span.png"), plot=p_3, dpi = 300,
+            units='in', width = 2, height = 2.5)
+
+```
+
+The above tables show an overall effect of clustering for SPiN-High and SPAN, even when controlling for demographic variables. Next, we visualize this relationship in terms of the differences in performance among clusters.
+
+Estimated marginal means are given for models containing clusters as a predictor.
